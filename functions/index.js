@@ -1,65 +1,52 @@
 const {onRequest} = require('firebase-functions/v2/https');
 const admin = require("firebase-admin")
-const express = require('express')
-const cors = require('cors')
-const multer = require('multer')
-
-// Multer Configuration
-// Configuración de multer
-const fileStorage = multer.diskStorage({
-    destination: (req, file, cb) => {
-      cb(null, 'uploads/'); // Carpeta donde se guardarán los archivos subidos
-    },
-    filename: (req, file, cb) => {
-      cb(null, file.originalname); // Utiliza el nombre original del archivo
-    }
-  });
-  
-const upload = multer({ fileStorage });
-
+const express = require('express');
+const { setGlobalOptions } = require('firebase-functions/v2/options');
+const cors = require('cors');
 
 // Firebase Configuration
-var serviceAccount = require("./serviceAccountKey.json");
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  storageBucket: 'gs://coinmo-8a9cd.appspot.com'
-});
+setGlobalOptions({ maxInstances: 10 });
+admin.initializeApp();
 
 const db = admin.firestore();
 const auth = admin.auth();
-const storage = admin.storage()
-
-
 
 //Main App
 const app = express()
+app.use(cors());
 
+app.post(('/coinmo/users'), async (req, res) => {
+    try{
+        // Fix user photo to default if no photo was selected
+        let photo
+        if(!req.body.photoURL) photo = "https://firebasestorage.googleapis.com/v0/b/coinmo-8a9cd.appspot.com/o/profilePictures%2Fdefault.png?alt=media&token=615c8290-1e8e-43d0-82f9-d2433af4e8c6"
+        else photo = req.body.photoURL
+        // User creation in Auth API
+        await auth.createUser({
+            uid: req.body.uid,
+            email: req.body.email,
+            password: req.body.password,
+            displayName: req.body.name,
+            photoURL: photo,
+        })
 
-// Routes
-app.post('/upload', upload.single('file'), (req, res) => {
-    // Accede al archivo subido mediante req.file
-    console.log('Archivo recibido:', req);
-  
-    // Realiza otras operaciones con el archivo
-    // ...
-  
-    //res.send('Archivo recibido correctamente');
-  });
+        // Calculate User Code
+        let code = 1;
+        const querySnapshot = await db.collection('users').where('name', '==', req.body.name)
+            .get()
+        if (!querySnapshot.empty) code = querySnapshot.size + 1
+        
+        // Calculate Search Name
+        const name = req.body.name.toLowerCase();
+        const searchName = [];
+        for (let i = 1; i <= name.length; i++) {
+            const substring = name.substring(0, i);
+            searchName.push(substring);
+        }
 
-app.post(('/coinmo/user/add'), async (req, res) => {
-    let photoUrl = null
-    let bucket = admin.storage().bucket()
-    const file = bucket.file(`profilePictures/a.jpg`);
-    console.log(req.body)
-    //await file.save(req.body.data)
-
-    /*
-    const user = await auth.createUser({
-        email: req.body.email,
-        password: req.body.password
-    })
-    await db.collection("users")
-        .doc(`/${user.uid}`)
+        // Creation of user in database
+        await db.collection("users")
+        .doc(`/${req.body.uid}`)
         .create({
             name: req.body.name,
             nif: req.body.nif,
@@ -74,47 +61,85 @@ app.post(('/coinmo/user/add'), async (req, res) => {
                     city: req.body.city,
                     country: req.body.country
             },
-            photoUrl: photoUrl
+            photoURL: photo,
+            code: `#${String(code).padStart(4, '0')}`,
+            searchName: searchName,
+            lastInvoice: 0
         });
-    const querySnapshot = await db.collection('usersPublic').get()
-    const number = "#" + querySnapshot.size.toString().padStart(4, '0');
-    await db.collection("usersPublic")
-        .doc(`/${user.uid}`)
-        .create({
-            name: req.body.name,
-            code: number,
-            category: req.body.category,
-            description: req.body.description,
-            photoUrl: photoUrl
-        })
-    //const image = bucket.file("profilePictures/GFNFGApbo0XlKcxa7PNQw3LBbHp1")
-    //console.log(image);
-    /*if(true){ 
-        await bucket.upload(req.body.file, {
-            destination: `profilePictures/${user.uid}`
-          });
-    }*/
 
-    return res.status(200).json(req.body)
+        
+        return res.status(200).json({
+            status: "success",
+            message: "user created succesfully"
+        })
+    } catch (error){
+        console.log(error)
+        return res.status(500).json({
+            status: "error",
+            message: error.code
+        });
+    }
     
+})
+
+app.get("/coinmo/user", async (req, res) => {
+    try{
+        // Validate User Token
+        const authHeader = req.headers['authorization'];
+        const token = authHeader && authHeader.split(' ')[1];
+        const decodedToken = await auth.verifyIdToken(token)
+
+        // Get user data
+        const userDoc = await db.collection('users').doc(decodedToken.uid).get()
+        const userData = userDoc.data()
+
+        // Send response
+        return res.status(200).json({
+            status: "success",
+            message: {
+                name: userData.name,
+                nif: userData.nif,
+                category: userData.category,
+                phoneNumber: userData.phoneNumber,
+                email: userData.email,
+                description: userData.description,
+                address: userData.address.street,
+                apartment: userData.address.apartment,
+                postalCode: userData.address.postalCode,
+                city: userData.address.city,
+                country: userData.address.country,
+                photoURL: userData.photoURL,
+            }
+        })
+    } catch (error){
+        return res.status(500).json({
+            status: "error",
+            message: error.code
+        });
+    }
 })
 
 app.get(('/coinmo/user/:name'), async (req, res) => {
     
     try {
-        let response  = []      
-        const querySnapshot = await db.collection('usersPublic').get()
+        let response  = []
+         
+        const querySnapshot = await db.collection('users').where("searchName", "array-contains", req.params.name.toLowerCase()).get()
         querySnapshot.docs.forEach( (doc) => {
-            if (doc.data().name.includes(req.params.name)){
-                response.push({
-                    id: doc.id,
-                    ...doc.data()
-                })
-            } 
+            response.push({
+                id: doc.id,
+                name: doc.data().name,
+                code: doc.data().code,
+                category: doc.data().category,
+                photoURL: doc.data().photoURL
+            }) 
         })
         return res.status(200).json(response)
     } catch (error) {
-        return res.status(500).json();
+        return res.status(500).json({
+            status: "error",
+            message: error.code
+        })
     }
 })
 
@@ -130,8 +155,10 @@ app.get(('/coinmo/invoice/:id'), async (req, res) => {
         const invoice = await db.collection('users').doc(decodedToken.uid).collection('invoices').doc(req.params.id).get()
         return res.status(200).json(invoice.data())
     } catch (error) {
-        console.log(error)
-        return res.status(500).json()
+        return res.status(500).json({
+            status: "error",
+            message: error.code
+        })
     }
 })
 
@@ -163,7 +190,8 @@ app.post(('/coinmo/invoice'), async (req, res) => {
         
         // Get server timestamp
         const serverTimestamp = Date.now()
-        
+        const date = new Date(serverTimestamp)
+
         const invoice = {
             customer: {
                 id: customerId,
@@ -208,7 +236,7 @@ app.post(('/coinmo/invoice'), async (req, res) => {
             taxBase: taxBase,
             total: total,
             timestamp: serverTimestamp,
-            invoiceId: customerData.lastInvoice + 1,
+            invoiceId: `F${date.getFullYear()}-${String(vendorData.lastInvoice + 1).padStart(6, '0')}`,
             state: "pending"
         }
 
@@ -233,11 +261,16 @@ app.post(('/coinmo/invoice'), async (req, res) => {
             ...vendorData,
             lastInvoice: vendorData.lastInvoice + 1
         })
-        return res.status(200).json()
+        return res.status(200).json({
+            status: "success",
+            message: "invoice created succesfully"
+        })
       } 
       catch (error) {
-        console.log(error)
-        return res.status(500).json()
+        return res.status(500).json({
+            status: "error",
+            message: error.code
+        })
       }
 })
 
@@ -250,14 +283,22 @@ app.delete("/coinmo/invoice/:id", async(req, res) => {
 
         // Delete Invoice
         await db.collection('users').doc(decodedToken.uid).collection('invoices').doc(req.params.id).delete()
-        return res.status(200).json()
+        return res.status(200).json({
+            status: "success",
+            message: "invoice deleted succesfully"
+        })
     }catch(error){
-        return res.status(500).json()
+        return res.status(500).json({
+            status: "error",
+            message: error.code
+        })
     }
 })
 
 app.post("/coinmo/validate/invoice/:id", async (req, res) => {
     try{
+        const serverTimestamp = Date.now()
+        const date = new Date(serverTimestamp)
         // Validate User Token
         const authHeader = req.headers['authorization']
         const token = authHeader && authHeader.split(' ')[1]
@@ -276,8 +317,49 @@ app.post("/coinmo/validate/invoice/:id", async (req, res) => {
         await db.collection("users").doc(invoiceData.customer.id).collection("invoices").doc(req.params.id).update({state: "validated"})
         await db.collection("users").doc(invoiceData.vendor.id).collection("invoices").doc(req.params.id).update({state: "validated"})
 
+        // Update vendor statistics
+        const vendorStatisticsRef =  db.collection("users").doc(invoiceData.vendor.id).collection("statistics").doc(`${date.getMonth() + 1}-${date.getFullYear()}`)
+        vendorStatisticsRef.get()
+            .then((doc) => {
+                if (doc.exists){
+                    const data = doc.data()
+                    vendorStatisticsRef.update({
+                        sales: data.sales + invoiceData.total,
+                    })
+                }
+                else{
+                    vendorStatisticsRef.set({
+                        sales: invoiceData.total,
+                        expenses: 0,
+                        expensesByCategory: {}
+                    })
+                }
+            })
+
+        // Update customer statistics
+        const customerStatisticsRef = db.collection("users").doc(invoiceData.customer.id).collection("statistics").doc(`${date.getMonth() + 1}-${date.getFullYear()}`)
+        customerStatisticsRef.get()
+            .then((doc) => {
+                if (doc.exists){
+                    const data = doc.data()
+                    if (data.expensesByCategory.hasOwnProperty(invoiceData.vendor.category)) {
+                        data.expensesByCategory[invoiceData.vendor.category] += invoiceData.total;
+                    } else {
+                        data.expensesByCategory[invoiceData.vendor.category] = invoiceData.total;
+                    }
+                    data.expenses += invoiceData.total
+                    customerStatisticsRef.update(data)
+                }
+                else{
+                    customerStatisticsRef.set({
+                        sales: 0,
+                        expenses: invoiceData.total,
+                        expensesByCategory: {[invoiceData.vendor.category]: invoiceData.total}
+                    })
+                }
+            })
+
         // Notify vendor that state has changed
-        const serverTimestamp = Date.now()
         await db.collection("users").doc(invoiceData.vendor.id).collection("notifications").doc().set({
             type: "validated",
             timestamp: serverTimestamp,
@@ -290,9 +372,15 @@ app.post("/coinmo/validate/invoice/:id", async (req, res) => {
             message: `${invoiceData.customer.name} validated your invoice`,
             content: req.params.id
         })
-        return res.status(200).json()
+        return res.status(200).json({
+            status: "success",
+            message: "invoice validated succesfully"
+        })
     }catch(error){
-        return res.status(500).json()
+        return res.status(500).json({
+            status: "error",
+            message: error.code
+        })
     }
 })
 
@@ -312,9 +400,11 @@ app.post("/coinmo/decline/invoice/:id", async (req, res) => {
             throw new Error(`Invoice already been ${invoiceData.state}`)
         }
 
-        // Update state
-        await db.collection("users").doc(invoiceData.customer.id).collection("invoices").doc(req.params.id).update({state: "declined"})
+        // Update vendors invoice state
         await db.collection("users").doc(invoiceData.vendor.id).collection("invoices").doc(req.params.id).update({state: "declined"})
+
+        // Delete customers invoice
+        await db.collection("users").doc(invoiceData.customer.id).collection("invoices").doc(req.params.id).delete()
 
         // Notify vendor that state has changed
         const serverTimestamp = Date.now()
@@ -330,9 +420,15 @@ app.post("/coinmo/decline/invoice/:id", async (req, res) => {
             message: `${invoiceData.customer.name} declined your invoice`,
             content: req.params.id
         })
-        return res.status(200).json()
+        return res.status(200).json({
+            status: "success",
+            message: "invoice declines succesfully"
+        })
     }catch(error){
-        return res.status(500).json()
+        return res.status(500).json({
+            status: "error",
+            message: error.code
+        })
     }
 })
 
@@ -345,14 +441,16 @@ app.delete("/coinmo/notification/:id", async(req, res) => {
 
         // Delete Notification
         await db.collection('users').doc(decodedToken.uid).collection('notifications').doc(req.params.id).delete()
-        return res.status(200).json()
+        return res.status(200).json({
+            status: "success",
+            message: "notification deleted succesfully"
+        })
     }catch(error){
-        return res.status(500).json()
+        return res.status(500).json({
+            status: "error",
+            message: error.code
+        })
     }
 })
 
-
-
-
 exports.app = onRequest(app);
-
